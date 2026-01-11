@@ -2,267 +2,225 @@
 
 # Backstory–Novel Consistency Verifier
 
-## 1. Project Overview
+## 1. Overview
 
-The **Backstory–Novel Consistency Verifier** is an automated reasoning system that determines whether a given **character backstory** is **consistent** or **contradictory** with respect to a **novel**.
-The system decomposes backstories into atomic claims, retrieves multi-hop evidence from the novel using a hybrid retrieval strategy, and applies an agentic evaluation framework to reach a **single, definitive label**.
+This project implements an automated system for verifying whether a **character backstory** is **consistent** or **contradictory** with respect to a **novel**.
+Given a novel–backstory pair, the system performs narrative-aware retrieval and multi-agent reasoning to output a **single binary label**.
 
-**Final Output (strict constraint):**
+**Output (strict):**
 
 ```
 consistent | contradict
 ```
 
-No partial, neutral, or probabilistic outputs are allowed.
-
-The system is explicitly designed to **generalize to unseen novels** and does **not depend on any training CSV at inference time**.
+The system is designed to **generalize to unseen novels** and operates **entirely at inference time**, without reliance on training datasets.
 
 ---
 
-## 2. High-Level Architecture (Textual Diagram)
+## 2. Problem Framing
+
+For each test instance:
+
+* Input:
+
+  * Full novel text
+  * Character backstory text
+* Output:
+
+  * One label indicating whether the backstory contradicts the novel
+
+If **any atomic claim** in the backstory contradicts the novel, the entire backstory is classified as **contradict**; otherwise, it is **consistent**.
+
+---
+
+## 3. High-Level Architecture
 
 ```
-Input:
- ├── Character Backstory (free text)
- └── Novel (full text)
+Novel Text
+   ↓
+Narrative-Aware Chunking (Pathway RecursiveSplitter)
+   ↓
+Hybrid Retrieval Index
+   ├── Semantic (SBERT embeddings)
+   └── Lexical (BM25)
 
-Pipeline:
- ├── Narrative-Aware Novel Chunking (Pathway RecursiveSplitter)
- ├── Backstory Claim Extraction (spaCy)
- │     ├── Atomic Claims
- │     └── Normalized Claims
- ├── Hybrid Retrieval
- │     ├── Semantic Retrieval (SBERT embeddings)
- │     ├── Lexical Retrieval (BM25)
- │     └── Score Fusion
- ├── Multi-Hop Evidence Retrieval
- ├── Evidence Pruning
- │     ├── Relevance Filtering
- │     └── Contradiction Detection
- ├── Agentic Evaluation
- │     ├── Evidence Agent
- │     ├── Causal Agent
- │     ├── Devil’s Advocate Agent
- │     └── Ensemble Scoring
- └── Backstory-Level Decision
-
-Output:
- └── {consistent | contradict}
+Backstory Text
+   ↓
+spaCy-Based Claim Extraction
+   ├── Atomic Claims
+   └── Normalized Claims
+   ↓
+Multi-Hop Evidence Retrieval
+   ↓
+Evidence Pruning
+   ├── Relevance Filtering
+   └── Contradiction Detection
+   ↓
+Agentic Evaluation
+   ├── Evidence Agent
+   ├── Causal Agent
+   └── Devil’s Advocate Agent
+   ↓
+Ensemble Scoring
+   ↓
+Final Backstory-Level Decision
 ```
 
 ---
 
-## 3. Detailed Pipeline
+## 4. Handling Long Context
 
-### 3.1 Narrative-Aware Novel Chunking
+* Novels are chunked using **Pathway RecursiveSplitter**
+* Chunking preserves:
 
-* The novel is segmented using **Pathway RecursiveSplitter**.
-* Chunking is **structure-aware**, preserving narrative continuity across:
-
-  * events
-  * timelines
-  * causal sequences
-* Chunk boundaries are optimized for downstream retrieval rather than fixed token sizes.
-
-This avoids evidence fragmentation common in naive sliding-window approaches.
+  * narrative continuity
+  * temporal flow
+  * causal relationships
+* This avoids truncation and evidence fragmentation common in fixed-window methods
 
 ---
 
-### 3.2 Claim Extraction from Backstories
+## 5. Claim Extraction and Normalization
 
-Backstories are decomposed using **spaCy-based linguistic parsing**.
+### Atomic Claims
 
-#### Atomic Claims
+* Backstories are decomposed into minimal factual units using **spaCy dependency parsing**
+* Each atomic claim represents a single verifiable assertion
 
-* Each sentence is split into **minimal factual assertions**.
-* Example:
+### Normalized Claims
 
-  ```
-  "He grew up in poverty and learned medicine from his grandmother."
-  ```
+* Claims are rewritten into canonical forms for retrieval:
 
-  becomes:
-
-  * He grew up in poverty.
-  * He learned medicine from his grandmother.
-
-Atomic claims are **evaluation units**.
-
-#### Normalized Claims
-
-Each atomic claim is normalized to improve retrieval:
-
-* pronoun resolution
-* tense normalization
-* removal of stylistic modifiers
-* canonical subject–predicate–object structure
-
-Normalized claims are used **only for retrieval**, not for final judgment.
+  * pronoun resolution
+  * tense normalization
+  * removal of stylistic modifiers
+* Normalized claims are **used only for retrieval**, not for judgment
 
 ---
 
-### 3.3 Hybrid Retrieval Strategy
+## 6. Retrieval Strategy
 
-The system uses **hybrid retrieval** to maximize recall.
+### Hybrid Retrieval
 
-#### Semantic Retrieval
+* **Semantic retrieval** using SBERT embeddings captures paraphrased evidence
+* **Lexical retrieval** using BM25 ensures exact factual grounding
+* Scores are fused to form a high-recall evidence pool
 
-* Embeddings generated using **SentenceTransformers (SBERT)** by default
-* Optional OpenAI embeddings supported
-* Captures paraphrased and implicit evidence
+### Multi-Hop Retrieval
 
-#### Lexical Retrieval
+* Evidence is expanded iteratively to capture:
 
-* **BM25 (rank-bm25)** for exact and near-exact term matches
-* Ensures factual grounding for concrete details (dates, roles, locations)
-
-#### Fusion
-
-* Semantic and lexical scores are combined via weighted fusion
-* Top-K candidates form the evidence pool
+  * temporally distant facts
+  * causally linked events
+* Enables detection of indirect contradictions
 
 ---
 
-### 3.4 Multi-Hop Evidence Retrieval
+## 7. Evidence Pruning
 
-* Initial evidence chunks may be incomplete
-* The system performs **iterative retrieval hops**:
+Evidence candidates are filtered using:
 
-  * expand from initial evidence
-  * follow narrative or causal references
-* This enables reasoning over:
+1. **Relevance scoring** to remove unrelated narrative text
+2. **Contradiction detection**, including:
 
-  * temporally separated facts
-  * implied contradictions
-
----
-
-### 3.5 Evidence Pruning
-
-Evidence candidates are pruned in two stages:
-
-1. **Relevance Filtering**
-
-   * Semantic alignment with the claim
-   * Removal of tangential narrative content
-
-2. **Contradiction Detection**
-
-   * Checks for negation, temporal conflict, role mismatch, or causal impossibility
-   * Evidence explicitly opposing a claim is retained and flagged
+   * negation
+   * temporal conflict
+   * role or identity mismatch
+   * causal impossibility
 
 ---
 
-## 4. Agentic Evaluation Framework
+## 8. Agentic Evaluation
 
-Each atomic claim is evaluated by **multiple specialized agents**.
+Each atomic claim is evaluated by three agents:
 
-### 4.1 Evidence Agent
+* **Evidence Agent**
+  Checks direct textual support or contradiction.
 
-* Verifies whether retrieved evidence **supports or contradicts** the claim
-* Focuses on explicit textual grounding
+* **Causal Agent**
+  Evaluates temporal and causal coherence across events.
 
-### 4.2 Causal Agent
+* **Devil’s Advocate Agent**
+  Actively searches for counter-evidence to prevent false consistency.
 
-* Evaluates **temporal and causal consistency**
-* Flags contradictions such as:
-
-  * impossible timelines
-  * mutually exclusive life events
-
-### 4.3 Devil’s Advocate Agent
-
-* Actively searches for **counter-evidence**
-* Assumes the claim is false unless proven otherwise
-* Reduces false positives for consistency
+Agent outputs are combined via **ensemble scoring** to produce a claim-level verdict.
 
 ---
 
-### 4.4 Ensemble Scoring
+## 9. Final Decision Logic
 
-* Each agent produces a structured judgment
-* Judgments are combined using **ensemble logic**
-* A single **claim-level verdict** is produced
-
----
-
-## 5. Final Decision Logic
-
-* All atomic claims are evaluated independently
-* **Backstory-level rule**:
+* Claims are evaluated independently
+* **Decision rule:**
 
 ```
-If ANY atomic claim is contradicted → contradict
+If any claim is contradicted → contradict
 Else → consistent
 ```
 
-This conservative rule ensures:
-
-* no partial acceptance
-* strict logical consistency
+The system always outputs **exactly one label per test example**.
 
 ---
 
-## 6. How to Run the Project
+## 10. Running the Code (Evaluator Setup)
 
-### 6.1 Environment Setup
+The code is designed to be executed **end-to-end without manual intervention**.
 
-```bash
-pip install spacy sentence-transformers rank-bm25 pathway numpy scikit-learn
-python -m spacy download en_core_web_sm
-```
+### Input Assumption
 
-### 6.2 Execution Steps
+* Evaluators provide a CSV file containing novel–backstory pairs
+* The CSV is treated strictly as an inference-time input container
 
-1. Provide:
-
-   * full novel text
-   * character backstory text
-2. Run the main pipeline script:
+### Execution
 
 ```bash
-python run_verifier.py --novel novel.txt --backstory backstory.txt
+python run_verifier.py --input_csv <provided_input>.csv --output_csv results.csv
 ```
 
-### 6.3 Output
+### Output
 
-```text
-consistent
+* The system generates a file named:
+
+```
+results.csv
 ```
 
-or
-
-```text
-contradict
-```
-
-No auxiliary outputs are produced at inference time.
+* The file contains **one row per test example** with a single prediction label
 
 ---
 
-## 7. Limitations
+## 11. Reproducibility
+
+* No training data is required at inference
+* No hardcoded file paths or interactive steps
+* All predictions are deterministic given the input
+
+---
+
+## 12. Limitations and Failure Cases
 
 * Implicit contradictions requiring deep world knowledge may be missed
-* Very long novels increase retrieval cost
-* Coreference resolution errors can affect claim normalization
-* Currently focused on **binary consistency**, not explanation generation
+* Extremely long novels increase retrieval cost
+* Coreference errors can affect claim normalization
+* Binary output does not expose explanations by design
 
 ---
 
-## 8. Future Work
+## 13. Tech Stack
 
-* Symbolic–neural hybrid contradiction reasoning
-* Cross-chapter temporal graph modeling
-* Evidence explanation generation (optional, non-inference mode)
-* Scaling to multi-character joint consistency checking
+* Python
+* spaCy
+* SentenceTransformers (SBERT)
+* rank-bm25
+* Pathway
+* NumPy / scikit-learn
 
 ---
 
-## 9. Key Design Principles
+## 14. Design Principles
 
 * Generalization over memorization
+* Retrieval-first, reasoning-second
+* Conservative contradiction handling
 * Strict binary decision boundary
-* Retrieval-first, reasoning-second architecture
-* Agentic redundancy for robustness
 
 ---
